@@ -2,18 +2,37 @@ import random
 import time
 from playwright.sync_api import Page
 
-def move_and_click(page: Page, locator, steps=60):
+PATH_TO_VIDEO_FOLDER = "./video"
+
+def move_and_click(page, locator, steps=60, duration=0.7):
     box = locator.bounding_box()
-    x = box["x"] + box["width"] / 2
-    y = box["y"] + box["height"] / 2
-    page.mouse.move(x, y, steps=steps)
-    page.mouse.click(x, y)
+
+    target_x = box["x"] + box["width"] / 2
+    target_y = box["y"] + box["height"] / 2
+
+    start_x, start_y = page.evaluate(
+        "() => [window.mouseX, window.mouseY]"
+    )
+
+    for i in range(1, steps + 1):
+        t = i / steps
+        progress = 1 - (1 - t) ** 3
+
+        x = start_x + (target_x - start_x) * progress
+        y = start_y + (target_y - start_y) * progress
+
+        page.mouse.move(x, y)
+        time.sleep(duration / steps)
+
+    page.mouse.click(target_x, target_y)
 
 def inject_cursor(page):
     page.add_init_script("""
         document.addEventListener('DOMContentLoaded', () => {
             const cursor = document.createElement('div');
             cursor.id = 'custom-cursor';
+            window.mouseX = 0;
+            window.mouseY = 0;
 
             cursor.innerHTML = `
                 <div class="cursor-halo"></div>
@@ -68,6 +87,9 @@ def inject_cursor(page):
             document.body.appendChild(cursor);
 
             document.addEventListener('mousemove', (event) => {
+                window.mouseX = event.clientX;
+                window.mouseY = event.clientY;
+
                 cursor.style.left = event.clientX + 'px';
                 cursor.style.top = event.clientY + 'px';
             });
@@ -109,10 +131,13 @@ def inject_cursor(page):
         });
     """)
 
+def CaptureVideo_Magento(url, company_name, language, country, postcode, city, street, house_no):
+    pass
+
 def sample_test(page: Page):
     inject_cursor(page)
     page.goto("https://duckduckgo.com")
-
+    
     move_and_click(page, page.locator('textarea[name="q"]'), steps=100)
 
     text = "Playwright"
@@ -122,6 +147,8 @@ def sample_test(page: Page):
         time.sleep(random.uniform(0.1, 0.25))
 
     move_and_click(page, page.locator('form button[type="submit"]:visible'), steps=60)
+
+    page.wait_for_load_state("domcontentloaded")
 
     page.locator('a[data-testid="result-title-a"]').first.wait_for(state="visible",timeout=15000)
 
