@@ -31,6 +31,8 @@ def inject_cursor(page):
         document.addEventListener('DOMContentLoaded', () => {
             const cursor = document.createElement('div');
             cursor.id = 'custom-cursor';
+
+            let enterPressed = false;
             window.mouseX = 0;
             window.mouseY = 0;
 
@@ -128,6 +130,18 @@ def inject_cursor(page):
 
                 animation.onfinish = () => ripple.remove();
             });
+            document.addEventListener('submit', (event) => {
+                const target = document.elementFromPoint(window.mouseX, window.mouseY);
+                const button = target?.closest('button');
+
+                if (button) {
+                    document.dispatchEvent(new MouseEvent('mousedown', {
+                        bubbles: true,
+                        clientX: window.mouseX,
+                        clientY: window.mouseY
+                    }));
+                }
+            }, true);
         });
     """)
 
