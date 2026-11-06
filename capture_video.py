@@ -1,10 +1,24 @@
-from playwright.sync_api import sync_playwright
-from qscript import sample_test
+import csv
 
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=False)
-    page = browser.new_page()
-    page.on("console", lambda msg: print("BROWSER:", msg.text))
-    sample_test(page)
-    input("Press Enter to close the browser...")
-    browser.close()
+from qscript import CaptureVideo_Magento
+
+if __name__ == "__main__":
+    with open("input.csv", "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f, delimiter=";")
+
+        for row in reader:
+            output_path = CaptureVideo_Magento(
+                row["url"],
+                row["company_name"],
+                row["language"],
+                row["country"],
+                row["postcode"],
+                row["city"],
+                row["street"],
+                row["house_no"]
+            )
+
+            if output_path:
+                print(f"Success: {output_path}")
+            else:
+                print(f"Failed: {row['company_name']}")

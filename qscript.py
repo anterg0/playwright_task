@@ -1,6 +1,7 @@
 import random
 import time
-from playwright.sync_api import Page
+import os
+from playwright.sync_api import sync_playwright
 
 PATH_TO_VIDEO_FOLDER = "./video"
 
@@ -145,25 +146,99 @@ def inject_cursor(page):
         });
     """)
 
+def ShowCallout(page, text, bgColor="#FFFF00", textColor="#000000", fade=True):
+    page.evaluate("""({text, bgColor, textColor, fade}) => {
+        const box = document.createElement("div");
+        box.id = "playwright-callout";
+        box.textContent = text;
+
+        Object.assign(box.style, {
+            position: "fixed",
+            top: "30px",
+            left: "50%",
+            transform: "translateX(-50%)",
+            padding: "12px 20px",
+            background: bgColor,
+            color: textColor,
+            font: "16pt Arial",
+            width: "fit-content",
+            zIndex: "999999",
+            boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+            opacity: fade ? "0" : "1",
+            transition: fade ? "opacity 2s" : "none"
+        });
+
+        document.body.appendChild(box);
+
+        if (fade) requestAnimationFrame(() => box.style.opacity = "1");
+
+        setTimeout(() => {
+            if (fade) box.style.opacity = "0";
+            setTimeout(() => box.remove(), fade ? 2000 : 0);
+        }, 3000);
+    }""", {
+        "text": text,
+        "bgColor": bgColor,
+        "textColor": textColor,
+        "fade": fade
+    })
+
+    page.wait_for_function(
+        "() => !document.getElementById('playwright-callout')"
+    )
+
 def CaptureVideo_Magento(url, company_name, language, country, postcode, city, street, house_no):
-    pass
+    browser = None
+    context = None
 
-def sample_test(page: Page):
-    inject_cursor(page)
-    page.goto("https://duckduckgo.com")
-    
-    move_and_click(page, page.locator('textarea[name="q"]'), steps=100)
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=False)
 
-    text = "Playwright"
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 720},
+                record_video_dir=PATH_TO_VIDEO_FOLDER,
+                record_video_size={"width": 1280, "height": 720}
+            )
 
-    for char in text:
-        page.keyboard.type(char)
-        time.sleep(random.uniform(0.1, 0.25))
+            page = context.new_page()
+            video = page.video
+            inject_cursor(page)
 
-    move_and_click(page, page.locator('form button[type="submit"]:visible'), steps=60)
+            # this next part of the function would look much more different in a real situation
+            page.goto(url)
 
-    page.wait_for_load_state("domcontentloaded")
+            ShowCallout(page, "Hello World!")
 
-    page.locator('a[data-testid="result-title-a"]').first.wait_for(state="visible",timeout=15000)
+            move_and_click(page, page.locator('textarea[name="q"]'), steps=100)
 
-    move_and_click(page, page.locator('a[data-testid="result-title-a"]').first, steps=60)
+            text = "Magento developer in " + city
+
+            for char in text:
+                page.keyboard.type(char)
+                time.sleep(random.uniform(0.1, 0.25))
+
+            move_and_click(page, page.locator('form button[type="submit"]:visible'), steps=60)
+
+            page.locator('a[data-testid="result-title-a"]').first.wait_for(
+                state="visible", timeout=15000
+            )
+
+            move_and_click(page, page.locator('a[data-testid="result-title-a"]').first, steps=60)
+
+            time.sleep(3)
+
+            context.close()
+
+            output_path = os.path.abspath(f"{PATH_TO_VIDEO_FOLDER}/{company_name}.webm")
+
+            video.save_as(output_path)
+            video.delete()
+
+            browser.close()
+            return output_path
+
+    except Exception as e:
+        print(f"Recording failed: {e}")
+        return None
+
