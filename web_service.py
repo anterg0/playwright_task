@@ -1,25 +1,31 @@
 
 import os
-import sqlite3
+import time
+import psycopg2
 from pathlib import Path
 
 from flask import Flask, request, jsonify, g, send_from_directory
 from werkzeug.utils import secure_filename
+from psycopg2 import OperationalError
 
-BASE_DIR = Path(__file__).resolve().parent
-UPLOAD_FOLDER = BASE_DIR / "uploads"
-DATABASE = BASE_DIR / "videos.db"
+UPLOAD_FOLDER = Path(__file__).resolve().parent / "uploads"
 
 app = Flask(__name__)
-app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-app.config["DATABASE"] = DATABASE
+
+
+def connect_db():
+    return psycopg2.connect(
+        host=os.environ["DB_HOST"],
+        port=os.environ["DB_PORT"],
+        dbname=os.environ["DB_NAME"],
+        user=os.environ["DB_USER"],
+        password=os.environ["DB_PASSWORD"]
+    )
 
 
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(app.config["DATABASE"], timeout=5)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA busy_timeout = 5000")
+        g.db = connect_db()
 
     return g.db
 
@@ -33,19 +39,36 @@ def close_db(error=None):
 
 def init_db():
     UPLOAD_FOLDER.mkdir(exist_ok=True)
+    for attempt in range(30):
+        db = None
 
-    with sqlite3.connect(DATABASE, timeout=5) as db:
-        db.execute("PRAGMA journal_mode=WAL")
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS videos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                company_name TEXT NOT NULL UNIQUE,
-                file_path TEXT NOT NULL,
-                video_url TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-            )
-        """)
+        try:
+            db = connect_db()
+
+            with db.cursor() as cursor:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS videos (
+                        id SERIAL PRIMARY KEY,
+                        company_name TEXT NOT NULL UNIQUE,
+                        file_path TEXT NOT NULL,
+                        video_url TEXT NOT NULL,
+                        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+                    )
+                """)
+
+            db.commit()
+            return
+
+        except OperationalError:
+            if attempt == 29:
+                raise
+
+            time.sleep(2)
+
+        finally:
+            if db is not None:
+                db.close()
 
 
 @app.route("/upload", methods=["POST"])
@@ -59,7 +82,11 @@ def upload_video():
     if not company_name:
         return jsonify({"error": "Company name is required"}), 400
 
-    safe_name = secure_filename(company_name) or "video"
+    safe_name = secure_filename(company_name)
+
+    if not safe_name:
+        return jsonify({"error": "Invalid company name"}), 400
+
     filename = f"{safe_name}.webm"
     file_path = UPLOAD_FOLDER / filename
 
@@ -68,12 +95,14 @@ def upload_video():
     video_url = f"{request.host_url.rstrip('/')}/media/{filename}"
 
     db = get_db()
-    db.execute("""
-        INSERT INTO videos (company_name, file_path, video_url)
-        VALUES (?, ?, ?)
-        ON CONFLICT(company_name) DO UPDATE SET
-            updated_at = datetime('now')
-    """, (company_name, str(file_path.resolve()), video_url))
+
+    with db.cursor() as cursor:
+        cursor.execute("""
+            INSERT INTO videos (company_name, file_path, video_url)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (company_name) DO UPDATE SET
+                updated_at = NOW()
+        """, (company_name, os.path.abspath(file_path), video_url))
 
     db.commit()
 
@@ -88,17 +117,21 @@ def get_video_url():
     company_name = request.args.get("company_name", "").strip()
 
     db = get_db()
-    video = db.execute(
-        "SELECT video_url FROM videos WHERE company_name = ?",
-        (company_name,)
-    ).fetchone()
+
+    with db.cursor() as cursor:
+        cursor.execute(
+            "SELECT video_url FROM videos WHERE company_name = %s",
+            (company_name,)
+        )
+
+        video = cursor.fetchone()
 
     if video is None:
         return jsonify({"error": "Video not found"}), 404
 
     return jsonify({
         "company_name": company_name,
-        "video_url": video["video_url"]
+        "video_url": video[0]
     })
 
 
