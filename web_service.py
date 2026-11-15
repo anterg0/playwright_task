@@ -1,6 +1,7 @@
 
 import os
 import time
+import uuid
 import psycopg2
 from pathlib import Path
 
@@ -39,6 +40,7 @@ def close_db(error=None):
 
 def init_db():
     UPLOAD_FOLDER.mkdir(exist_ok=True)
+
     for attempt in range(30):
         db = None
 
@@ -52,6 +54,24 @@ def init_db():
                         company_name TEXT NOT NULL UNIQUE,
                         file_path TEXT NOT NULL,
                         video_url TEXT NOT NULL,
+                        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+                    )
+                """)
+
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS video_jobs (
+                        id SERIAL PRIMARY KEY,
+                        video_id INTEGER NOT NULL UNIQUE REFERENCES videos(id),
+                        processed_video_url TEXT,
+                        status TEXT NOT NULL DEFAULT 'pending'
+                            CHECK (status IN (
+                                'pending',
+                                'processing',
+                                'completed',
+                                'failed'
+                            )),
+                        error TEXT,
                         created_at TIMESTAMP NOT NULL DEFAULT NOW(),
                         updated_at TIMESTAMP NOT NULL DEFAULT NOW()
                     )
@@ -74,6 +94,7 @@ def init_db():
 @app.route("/upload", methods=["POST"])
 def upload_video():
     file = request.files.get("file")
+    zoom_data = request.files.get("zoom_data")
     company_name = request.form.get("company_name", "").strip()
 
     if not file or not file.filename:
@@ -89,8 +110,7 @@ def upload_video():
 
     filename = f"{safe_name}.webm"
     file_path = UPLOAD_FOLDER / filename
-
-    file.save(file_path)
+    zoom_data_path = Path(f"{file_path}.zoom.json")
 
     video_url = f"{request.host_url.rstrip('/')}/media/{filename}"
 
@@ -102,13 +122,92 @@ def upload_video():
             VALUES (%s, %s, %s)
             ON CONFLICT (company_name) DO UPDATE SET
                 updated_at = NOW()
-        """, (company_name, os.path.abspath(file_path), video_url))
+            RETURNING id
+        """, (
+            company_name,
+            str(file_path.resolve()),
+            video_url
+        ))
+
+        video_id = cursor.fetchone()[0]
+
+        file.save(file_path)
+
+        if zoom_data and zoom_data.filename:
+            zoom_data.save(zoom_data_path)
+            cursor.execute("""
+                INSERT INTO video_jobs (video_id)
+                VALUES (%s)
+                ON CONFLICT (video_id) DO UPDATE SET
+                    processed_video_url = NULL,
+                    status = 'pending',
+                    error = NULL,
+                    updated_at = NOW()
+                RETURNING id
+            """, (video_id,))
+
+            job_id = cursor.fetchone()[0]
+        else:
+            zoom_data_path.unlink(missing_ok=True)
+
+            zoomed_video_path = file_path.with_name(
+                f"{file_path.stem}_zoomed{file_path.suffix}"
+            )
+            zoomed_video_path.unlink(missing_ok=True)
+
+            cursor.execute("""
+                DELETE FROM video_jobs
+                WHERE video_id = %s
+            """, (video_id,))
+
+            job_id = None
+
 
     db.commit()
 
     return jsonify({
         "company_name": company_name,
-        "video_url": video_url
+        "video_id": video_id,
+        "job_id": job_id,
+        "video_url": video_url,
+        "status": "pending" if job_id is not None else "completed"
+    }), 202
+
+
+@app.route("/jobs/<int:job_id>", methods=["GET"])
+def get_job_status(job_id):
+    db = get_db()
+
+    with db.cursor() as cursor:
+        cursor.execute("""
+            SELECT
+                video_jobs.id,
+                videos.company_name,
+                videos.video_url,
+                video_jobs.status,
+                video_jobs.processed_video_url,
+                video_jobs.error,
+                video_jobs.created_at,
+                video_jobs.updated_at
+            FROM video_jobs
+            JOIN videos ON videos.id = video_jobs.video_id
+            WHERE video_jobs.id = %s
+        """, (job_id,))
+
+        job = cursor.fetchone()
+
+    if job is None:
+        return jsonify({"error": "Job not found"}), 404
+
+    return jsonify({
+        "job_id": job[0],
+        "company_name": job[1],
+        "video_url": job[2],
+        "status": job[3],
+        "processed_video_url": job[4],
+        "error": job[5],
+        "created_at": job[6].isoformat(),
+        "updated_at": job[7].isoformat()
     })
 
 
@@ -119,10 +218,19 @@ def get_video_url():
     db = get_db()
 
     with db.cursor() as cursor:
-        cursor.execute(
-            "SELECT video_url FROM videos WHERE company_name = %s",
-            (company_name,)
-        )
+        cursor.execute("""
+            SELECT
+                videos.id,
+                videos.video_url,
+                video_jobs.id,
+                video_jobs.status,
+                video_jobs.processed_video_url
+            FROM videos
+            LEFT JOIN video_jobs ON video_jobs.video_id = videos.id
+            WHERE videos.company_name = %s
+            ORDER BY videos.created_at DESC
+            LIMIT 1
+        """, (company_name,))
 
         video = cursor.fetchone()
 
@@ -130,8 +238,11 @@ def get_video_url():
         return jsonify({"error": "Video not found"}), 404
 
     return jsonify({
-        "company_name": company_name,
-        "video_url": video[0]
+        "video_id": video[0],
+        "video_url": video[1],
+        "job_id": video[2],
+        "status": video[3],
+        "processed_video_url": video[4]
     })
 
 
