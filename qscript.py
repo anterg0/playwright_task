@@ -315,7 +315,7 @@ def CaptureVideo_Magento(url, company_name, language, country, postcode, city, s
 
             move_and_click(page, page.locator('textarea[name="q"]'), steps=100)
 
-            page.evaluate("window.__zoomAt(window.mouseX, window.mouseY)")
+            # page.evaluate("window.__zoomAt(window.mouseX, window.mouseY)")
 
             text = "Magento developer in " + city
 
@@ -323,15 +323,13 @@ def CaptureVideo_Magento(url, company_name, language, country, postcode, city, s
                 page.keyboard.type(char)
                 time.sleep(random.uniform(0.1, 0.25))
 
-            page.evaluate("window.__zoomAt(window.mouseX, window.mouseY)")
+            # page.evaluate("window.__zoomAt(window.mouseX, window.mouseY)")
 
             move_and_click(
                 page,
                 page.locator('form button[type="submit"]:visible'),
                 steps=60
             )
-
-            page.evaluate("window.__zoomAt(window.mouseX, window.mouseY)")
 
             page.locator('a[data-testid="result-title-a"]').first.wait_for(
                 state="visible",

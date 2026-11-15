@@ -187,7 +187,7 @@ def build_zoom_filter(
     focus_x = "0"
     focus_y = "0"
 
-    for pair in reversed(pairs):
+    for pair in pairs:
         start = pair["start"]
         x = max(0, min(pair["x"], width))
         y = max(0, min(pair["y"], height))
