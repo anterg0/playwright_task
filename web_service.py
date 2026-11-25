@@ -1,15 +1,28 @@
-
 import os
 import time
 import uuid
+import csv
+import io
 import psycopg2
 from pathlib import Path
+from enum import IntEnum
 
-from flask import Flask, request, jsonify, g, send_from_directory
+from flask import Flask, request, jsonify, g, send_from_directory, render_template_string
 from werkzeug.utils import secure_filename
 from psycopg2 import OperationalError
 
 UPLOAD_FOLDER = Path(__file__).resolve().parent / "uploads"
+
+
+class CompanyStatus(IntEnum):
+    PENDING = -1
+    OK = 0
+    NO_IMPRESSUM_LINK_FOUND = 1
+    PARSING_FAILED = 2
+    ADDRESS_INCOMPLETE = 3
+    ERROR = 4
+    NO_WEBSITE = 5
+
 
 app = Flask(__name__)
 
@@ -74,6 +87,32 @@ def init_db():
                         error TEXT,
                         created_at TIMESTAMP NOT NULL DEFAULT NOW(),
                         updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+                    )
+                """)
+
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS companies (
+                        id SERIAL PRIMARY KEY,
+                        company_name TEXT NOT NULL UNIQUE,
+                        language TEXT,
+                        country TEXT,
+                        postcode TEXT,
+                        city TEXT,
+                        street TEXT,
+                        house_no TEXT,
+                        web TEXT,
+                        status INTEGER,
+                        impressum_url TEXT,
+                        legal_name TEXT,
+                        postal_address TEXT,
+                        handelsregister TEXT,
+                        vat_number TEXT,
+                        phone TEXT,
+                        email TEXT,
+                        responsible_person TEXT,
+                        raw_json JSONB,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     )
                 """)
 
@@ -249,6 +288,176 @@ def get_video_url():
 @app.route("/media/<filename>", methods=["GET"])
 def serve_video(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
+
+
+# Simple HTML form for CSV upload
+UPLOAD_FORM = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Upload Companies CSV</title>
+    <meta charset="utf-8">
+</head>
+<body>
+    <h1>Upload Companies CSV</h1>
+    <form action="/upload_companies" method="post" enctype="multipart/form-data">
+        <input type="file" name="file" accept=".csv" required>
+        <button type="submit">Upload</button>
+    </form>
+    <p><a href="/companies">View all companies</a></p>
+</body>
+</html>
+"""
+
+
+@app.route("/upload_companies", methods=["GET"])
+def upload_companies_form():
+    return UPLOAD_FORM
+
+
+@app.route("/upload_companies", methods=["POST"])
+def upload_companies():
+    file = request.files.get("file")
+    if not file or not file.filename:
+        return jsonify({"error": "No CSV file provided"}), 400
+
+    if not file.filename.endswith(".csv"):
+        return jsonify({"error": "File must be a CSV"}), 400
+
+    stream = io.StringIO(file.stream.read().decode("utf-8"))
+    reader = csv.DictReader(stream, delimiter=";", quotechar='"')
+
+    imported = 0
+    updated = 0
+    total_rows = 0
+
+    db = get_db()
+    try:
+        with db.cursor() as cursor:
+            for row in reader:
+                total_rows += 1
+                company_name = row.get("Company Name", "").strip()
+                if not company_name:
+                    continue
+
+                # Only update CSV-provided columns, leave enrichment fields untouched
+                cursor.execute("""
+                    INSERT INTO companies (company_name, language, country, postcode, city, street, house_no, web)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (company_name) DO UPDATE SET
+                        language = EXCLUDED.language,
+                        country = EXCLUDED.country,
+                        postcode = EXCLUDED.postcode,
+                        city = EXCLUDED.city,
+                        street = EXCLUDED.street,
+                        house_no = EXCLUDED.house_no,
+                        web = EXCLUDED.web,
+                        updated_at = NOW()
+                    RETURNING (xmax = 0) AS imported
+                """, (
+                    row.get("Company Name", "").strip(),
+                    row.get("Language", "").strip() or None,
+                    row.get("Country", "").strip() or None,
+                    row.get("Postcode", "").strip() or None,
+                    row.get("City", "").strip() or None,
+                    row.get("Street", "").strip() or None,
+                    row.get("HouseNo", "").strip() or None,
+                    row.get("Web", "").strip() or None,
+                ))
+                result = cursor.fetchone()
+                if result and result[0]:
+                    imported += 1
+                else:
+                    updated += 1
+
+        db.commit()
+        return jsonify({
+            "imported": imported,
+            "updated": updated,
+            "total_rows": total_rows
+        }), 200
+
+    except Exception as e:
+        db.rollback()
+        return jsonify({"error": str(e)}), 500
+    finally:
+        db.close()
+
+
+@app.route("/companies", methods=["GET"])
+def list_companies():
+    status_filter = request.args.get("status")
+    db = get_db()
+    try:
+        with db.cursor() as cursor:
+            if status_filter is not None:
+                try:
+                    status_val = int(status_filter)
+                    cursor.execute("""
+                        SELECT id, company_name, language, country, postcode, city, street, house_no, web,
+                               status, impressum_url, legal_name, postal_address, handelsregister,
+                               vat_number, phone, email, responsible_person, raw_json,
+                               created_at, updated_at
+                        FROM companies
+                        WHERE status = %s
+                        ORDER BY id
+                    """, (status_val,))
+                except ValueError:
+                    return jsonify({"error": "Invalid status value"}), 400
+            else:
+                cursor.execute("""
+                    SELECT id, company_name, language, country, postcode, city, street, house_no, web,
+                           status, impressum_url, legal_name, postal_address, handelsregister,
+                           vat_number, phone, email, responsible_person, raw_json,
+                           created_at, updated_at
+                    FROM companies
+                    ORDER BY id
+                """)
+
+            rows = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description]
+            companies = [dict(zip(columns, row)) for row in rows]
+
+            # Convert datetime objects to ISO format strings
+            for company in companies:
+                for key, value in company.items():
+                    if hasattr(value, 'isoformat'):
+                        company[key] = value.isoformat()
+
+            return jsonify(companies)
+    finally:
+        db.close()
+
+
+@app.route("/companies/<company_name>", methods=["GET"])
+def get_company(company_name):
+    db = get_db()
+    try:
+        with db.cursor() as cursor:
+            cursor.execute("""
+                SELECT id, company_name, language, country, postcode, city, street, house_no, web,
+                       status, impressum_url, legal_name, postal_address, handelsregister,
+                       vat_number, phone, email, responsible_person, raw_json,
+                       created_at, updated_at
+                FROM companies
+                WHERE company_name = %s
+            """, (company_name,))
+
+            row = cursor.fetchone()
+
+        if row is None:
+            return jsonify({"error": "Company not found"}), 404
+
+        columns = [desc[0] for desc in cursor.description]
+        company = dict(zip(columns, row))
+
+        for key, value in company.items():
+            if hasattr(value, 'isoformat'):
+                company[key] = value.isoformat()
+
+        return jsonify(company)
+    finally:
+        db.close()
 
 
 if __name__ == "__main__":
